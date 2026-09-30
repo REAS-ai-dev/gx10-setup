@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=安裝全部（Docker + Ollama GB10）
+Comment=雙擊依序執行 install_docker.sh 與 ollama_gb10.sh：會開啟終端機並要求輸入 sudo 密碼，過程約 30-60 分鐘
+Exec=bash -c "exec bash ~/gx10-setup/launch-install-all.sh"
+Icon=utilities-terminal
+Terminal=false
+Categories=Utility;
