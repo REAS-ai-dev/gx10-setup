@@ -155,11 +155,9 @@ curl http://127.0.0.1:8002/v1/audio/transcriptions -F "file=@$HOME/whisper.cpp/s
 ## 6. 重開機後的行為
 
 - **Ollama** 開機就會啟動,但**模型要等第一次請求才會載入 GPU**(第一次請求會慢一些,之後常駐不卸載)
-- **Whisper 與 Reranker** 是使用者層級的服務,預設**要等安裝時的那個帳號登入後才會啟動**。若機器重開機後不會有人登入(例如當伺服器用),請執行一次:
-  ```bash
-  sudo loginctl enable-linger $USER
-  ```
-  之後開機就會自動啟動,不需要登入
+- **Whisper 與 Reranker** 是使用者層級的服務(`systemctl --user`)。安裝腳本會自動對執行安裝的帳號啟用 linger(`sudo loginctl enable-linger $USER`),所以開機就會啟動、登出後也會繼續執行,**不需要有人登入**
+  - 確認方式:`loginctl show-user $USER -p Linger` 要顯示 `Linger=yes`
+  - 若安裝時印出「啟用 linger 失敗」的警告,手動執行一次 `sudo loginctl enable-linger $USER` 即可
 
 ## 7. 常用指令
 
@@ -221,7 +219,7 @@ sudo systemctl daemon-reload && sudo systemctl restart ollama
 | Whisper 沒印出「已啟動」 | `systemctl --user status whisper-server whisper-proxy` | `journalctl --user -u whisper-server -u whisper-proxy -n 50`,常見是 port 被佔用 |
 | Reranker 印「PyTorch 偵測不到 CUDA」 | `~/rerank-env/bin/python -c "import torch; print(torch.cuda.is_available())"` | 仍可用 CPU 執行,只是較慢 |
 | Reranker 沒印出「已啟動」 | `systemctl --user status rerank-server` | 第一次要下載模型權重(1~2 分鐘);`journalctl --user -u rerank-server -n 50` 看是否連不到 HuggingFace 或磁碟不足 |
-| 重開機後 Whisper / Reranker 連不到 | 是否還沒有人登入 | 見第 6 節 `loginctl enable-linger` |
+| 重開機後 Whisper / Reranker 連不到 | `loginctl show-user $USER -p Linger` 是否為 `yes` | 見第 6 節,執行 `sudo loginctl enable-linger $USER` |
 | 雙擊 `.desktop` 沒反應 | 是否 clone 到 `~/gx10-setup` 以外的位置 | 改 clone 到 `~/gx10-setup`,或直接用指令執行 |
 | `bad interpreter: /bin/bash^M` | 檔案經過 Windows 電腦後換行格式被改掉 | `sed -i 's/\r$//' *.sh *.desktop` |
 

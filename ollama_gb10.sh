@@ -272,6 +272,21 @@ echo "Ollama 執行狀態（模型應顯示常駐 Forever）："
 OLLAMA_HOST="${OLLAMA_LISTEN_ADDR}" "$OLLAMA_BIN" ps || true
 
 # ------------------------------
+# 附加服務前置：啟用 linger
+# ------------------------------
+
+# Whisper / Reranker 是 systemd user service，預設只有在這個帳號登入時才會執行。
+# 啟用 linger 讓它們開機就啟動、登出後也繼續執行（伺服器重開機後通常不會有人登入）。
+if [ "${INSTALL_WHISPER:-1}" = "1" ] || [ "${INSTALL_RERANK:-1}" = "1" ]; then
+    if sudo loginctl enable-linger "$USER"; then
+        echo "已啟用 linger：Whisper / Reranker 開機即自動啟動，不需要登入。"
+    else
+        echo -e "${YELLOW}警告：啟用 linger 失敗，Whisper / Reranker 重開機後要等 ${USER} 登入才會啟動。${NC}"
+        echo "  可稍後手動執行：sudo loginctl enable-linger ${USER}"
+    fi
+fi
+
+# ------------------------------
 # 附加：安裝 Whisper STT（whisper.cpp, CUDA 加速）
 # ------------------------------
 
