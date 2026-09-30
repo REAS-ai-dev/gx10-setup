@@ -354,10 +354,6 @@ if [ "$INSTALL_WHISPER" = "1" ]; then
         echo "[1/7] 安裝 ffmpeg（arm64 static）..."
         if [ -f "${WHISPER_BIN_DIR}/ffmpeg" ]; then
             echo "  已存在，略過"
-        elif [ -x "${HOME}/bin/ffmpeg" ] && [ -x "${HOME}/bin/ffprobe" ]; then
-            echo "  沿用舊版安裝的 ${HOME}/bin/ffmpeg"
-            sudo install -o "$SVC_USER" -g "$SVC_USER" -m 0755 \
-                "${HOME}/bin/ffmpeg" "${HOME}/bin/ffprobe" "$WHISPER_BIN_DIR/"
         else
             tmp_ffmpeg="$(mktemp -d)"
             curl -fsSL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz \
@@ -389,13 +385,8 @@ if [ "$INSTALL_WHISPER" = "1" ]; then
 
         echo "[4/7] 下載 whisper ${WHISPER_MODEL} 模型..."
         WHISPER_MODEL_FILE="${WHISPER_DIR}/models/ggml-${WHISPER_MODEL}.bin"
-        LEGACY_WHISPER_MODEL_FILE="${LEGACY_WHISPER_DIR}/models/ggml-${WHISPER_MODEL}.bin"
         if [ -f "$WHISPER_MODEL_FILE" ]; then
             echo "  模型已存在，略過"
-        elif [ -f "$LEGACY_WHISPER_MODEL_FILE" ]; then
-            echo "  從舊版安裝位置複製模型（不重新下載）：${LEGACY_WHISPER_MODEL_FILE}"
-            sudo install -o "$SVC_USER" -g "$SVC_USER" -m 0644 \
-                "$LEGACY_WHISPER_MODEL_FILE" "$WHISPER_MODEL_FILE"
         else
             run_as_svc bash "${WHISPER_DIR}/models/download-ggml-model.sh" "$WHISPER_MODEL"
         fi
@@ -600,16 +591,6 @@ if [ "$INSTALL_RERANK" = "1" ]; then
         if [ "$CUDA_OK" != "1" ]; then
             echo -e "${YELLOW}警告：這個環境裝到的 PyTorch 偵測不到 CUDA，Reranker 會退回 CPU 執行（較慢）。${NC}"
             echo "  如需 GPU 加速，請確認 PyTorch 版本有支援 GB10（aarch64 + CUDA 13 / SM121）。"
-        fi
-
-        # 舊版把模型權重下載在執行者的 ~/.cache/huggingface，複製過來就不用重新下載。
-        # 只複製 refs/ 與 snapshots/（symlink 展開成實體檔），不複製 blobs/，避免佔兩倍空間。
-        if [ ! -d "${RERANK_HF_HOME}/hub/${RERANK_CACHE_NAME}" ] && [ -d "${LEGACY_RERANK_CACHE}/snapshots" ]; then
-            echo "  從舊版安裝位置複製模型權重（不重新下載）：${LEGACY_RERANK_CACHE}"
-            sudo mkdir -p "${RERANK_HF_HOME}/hub/${RERANK_CACHE_NAME}"
-            sudo cp -r "${LEGACY_RERANK_CACHE}/refs" "${RERANK_HF_HOME}/hub/${RERANK_CACHE_NAME}/"
-            sudo cp -rL "${LEGACY_RERANK_CACHE}/snapshots" "${RERANK_HF_HOME}/hub/${RERANK_CACHE_NAME}/"
-            sudo chown -R "${SVC_USER}:${SVC_USER}" "$RERANK_HF_HOME"
         fi
 
         echo "[2/4] 產生 Reranker Server（port ${RERANK_PORT}）..."

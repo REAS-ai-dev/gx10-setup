@@ -239,7 +239,7 @@ v1.0 的 Whisper / Reranker 是裝在執行者家目錄的使用者服務(`syste
 
 1. 建立 `gx10` 服務帳號與 `/opt/gx10/`
 2. 停用並移除舊的使用者服務,避免新舊兩套同時搶 port 8001 / 8002 / 8765
-3. **複製**已下載的 Whisper 模型、Reranker 模型權重與 ffmpeg,不重新下載
+3. 在 `/opt/gx10/` 重新下載並安裝 Whisper、Reranker、ffmpeg 與模型(跟全新安裝相同,約需 15~25 分鐘)
 4. 建立並啟動新的系統服務
 
 家目錄的舊檔案**不會自動刪除**。腳本最後會列出這些檔案與刪除指令(約 10 GB),確認新服務運作正常後再刪即可。v1.0 為安裝帳號開啟的 linger 不影響新版,不需要處理;若想關掉可執行 `sudo loginctl disable-linger $USER`。
