@@ -7,7 +7,7 @@
 - **Reranker**(`BAAI/bge-reranker-v2-m3`)
 - **Docker**(選用,給同一台機器上要跑的其他容器服務用)
 
-裝完後可直接給 NeuroSme 或其他支援 Ollama / OpenAI 相容 API 的應用程式使用。
+裝完後可直接給 [NeuroSme Private Hub](https://ee.neurosme.ai/zh-TW)(REAS.ai 的企業 AI 轉型平台)使用,也適用其他支援 Ollama / OpenAI 相容 API 的應用程式。
 
 ---
 
@@ -80,15 +80,17 @@ CHAT_MODEL=gemma4:26b INSTALL_WHISPER=0 bash ollama_gb10.sh
 | 服務 | Port | 用途 | 管理方式 |
 |---|---|---|---|
 | Ollama | `11434` | 對話(`gemma4:26b`)、Embedding(`bge-m3`) | `sudo systemctl ... ollama` |
-| Whisper Proxy | `8002` | 語音轉文字,OpenAI 相容 `/v1/audio/transcriptions` | `systemctl --user ... whisper-proxy` |
-| whisper-server | `8765` | whisper.cpp 原生 server(Proxy 在背後呼叫它) | `systemctl --user ... whisper-server` |
-| Reranker | `8001` | `POST /rerank {query, texts, top_n}` → `{results: [{index, score}]}` | `systemctl --user ... rerank-server` |
+| Whisper Proxy | `8002` | 語音轉文字,OpenAI 相容 `/v1/audio/transcriptions` | `sudo systemctl ... whisper-proxy` |
+| whisper-server | `8765` | whisper.cpp 原生 server(Proxy 在背後呼叫它) | `sudo systemctl ... whisper-server` |
+| Reranker | `8001` | `POST /rerank {query, texts, top_n}` → `{results: [{index, score}]}` | `sudo systemctl ... rerank-server` |
+
+Whisper 與 Reranker 以系統服務執行,身分是安裝時自動建立的專用服務帳號 `gx10`(不可登入),檔案都放在 `/opt/gx10/`,不綁任何人的帳號。
 
 腳本跑完會在 `~/gx10-setup` 底下產生一份 `gb10-install-report-<時間>.md` 部署報告,列出各服務狀態與連線網址。
 
-### 給 NeuroSme 的設定
+### 給 NeuroSme Private Hub 的設定
 
-| NeuroSme 設定 | 填什麼 |
+| NeuroSme Private Hub 設定 | 填什麼 |
 |---|---|
 | Ollama Base URL | `http://<機器 IP>:11434`(IP 見第 5 節) |
 | 對話模型 | `gemma4:26b` |
@@ -123,12 +125,12 @@ curl http://<Ollama 位址>/api/chat -d '{
   "stream": false
 }'
 
-systemctl --user status whisper-server whisper-proxy rerank-server
+sudo systemctl status whisper-server whisper-proxy rerank-server
 curl http://127.0.0.1:8002/health
 curl http://127.0.0.1:8001/health
 
 # 用 whisper.cpp 內建的範例音檔測一次轉錄
-curl http://127.0.0.1:8002/v1/audio/transcriptions -F "file=@$HOME/whisper.cpp/samples/jfk.wav"
+curl http://127.0.0.1:8002/v1/audio/transcriptions -F "file=@/opt/gx10/whisper.cpp/samples/jfk.wav"
 ```
 
 ## 5. 網路與安全(請務必閱讀)
@@ -155,9 +157,7 @@ curl http://127.0.0.1:8002/v1/audio/transcriptions -F "file=@$HOME/whisper.cpp/s
 ## 6. 重開機後的行為
 
 - **Ollama** 開機就會啟動,但**模型要等第一次請求才會載入 GPU**(第一次請求會慢一些,之後常駐不卸載)
-- **Whisper 與 Reranker** 是使用者層級的服務(`systemctl --user`)。安裝腳本會自動對執行安裝的帳號啟用 linger(`sudo loginctl enable-linger $USER`),所以開機就會啟動、登出後也會繼續執行,**不需要有人登入**
-  - 確認方式:`loginctl show-user $USER -p Linger` 要顯示 `Linger=yes`
-  - 若安裝時印出「啟用 linger 失敗」的警告,手動執行一次 `sudo loginctl enable-linger $USER` 即可
+- **Whisper 與 Reranker** 是系統服務,開機就會自動啟動並把模型載入 GPU,**不需要有人登入**
 
 ## 7. 常用指令
 
@@ -168,12 +168,12 @@ sudo journalctl -u ollama -f
 OLLAMA_HOST=<Ollama 位址> ollama ps
 
 # Whisper
-systemctl --user status whisper-server whisper-proxy
-journalctl --user -u whisper-server -u whisper-proxy -f
+sudo systemctl status whisper-server whisper-proxy
+sudo journalctl -u whisper-server -u whisper-proxy -f
 
 # Reranker
-systemctl --user status rerank-server
-journalctl --user -u rerank-server -f
+sudo systemctl status rerank-server
+sudo journalctl -u rerank-server -f
 
 # Docker
 sudo systemctl status docker
@@ -188,22 +188,22 @@ sudo systemctl daemon-reload && sudo systemctl restart ollama
 
 ## 8. 磁碟空間
 
-以一台已完整安裝(全部預設值 + Docker)的 GX10 實測:
+以一台已完整安裝(全部預設值 + Docker)的 GX10 實測(Whisper / Reranker 的大小為 v1.0 安裝在家目錄時的實測值,搬到 `/opt/gx10/` 後內容相同):
 
 | 元件 | 位置 | 大小 |
 |---|---|---:|
 | Ollama 本體 | `/usr/local/bin/ollama`、`/usr/local/lib/ollama/` | 2.2 GB |
 | Ollama 模型(`gemma4:26b` 18.6 GB + `bge-m3` 1.2 GB) | `/usr/share/ollama/.ollama/models/` | 19.8 GB |
-| Whisper STT(含 `medium` 模型 1.5 GB、ffmpeg) | `~/whisper.cpp/`、`~/whisper-env/`、`~/bin/` | 1.9 GB |
-| Reranker(PyTorch 環境 5.7 GB + 模型 2.3 GB) | `~/rerank-env/`、`~/.cache/huggingface/` | 8.0 GB |
+| Whisper STT(含 `medium` 模型 1.5 GB、ffmpeg) | `/opt/gx10/whisper.cpp/`、`/opt/gx10/whisper-env/`、`/opt/gx10/bin/` | 1.9 GB |
+| Reranker(PyTorch 環境 5.7 GB + 模型 2.3 GB) | `/opt/gx10/rerank-env/`、`/opt/gx10/huggingface/` | 8.0 GB |
 | Docker(套件本身,不含映像檔) | `/usr` | 0.3 GB |
 | **合計** | | **約 32 GB** |
-| pip 下載快取(可刪除) | `~/.cache/pip/` | 3.2 GB |
 
-- 放在 `/` 分割區的約 22 GB(Ollama 與模型),放在 `/home` 的約 10 GB(Whisper、Reranker)。兩者分開的機器請各自確認空間
+- 全部都在 `/` 分割區(`/usr`、`/opt`),不佔 `/home`
 - 只裝 Ollama(`INSTALL_WHISPER=0 INSTALL_RERANK=0`)約需 22 GB
 - `WHISPER_MODEL=large-v3` 的模型檔約 3.1 GB(`medium` 為 1.5 GB)
-- 安裝完成後可執行 `rm -rf ~/.cache/pip` 釋放 3 GB;**不要**刪 `~/.cache/huggingface`(Reranker 正在使用的模型)
+- 安裝時 pip 不保留下載快取,所以不會多佔空間
+- 從 v1.0 升級的機器,舊檔案還留在家目錄(約 10 GB),見第 10 節
 
 ## 9. 疑難排解
 
@@ -216,10 +216,10 @@ sudo systemctl daemon-reload && sudo systemctl restart ollama
 | 模型下載卡住 | `curl -I https://ollama.com` | 重跑 `bash ollama_gb10.sh`,下載會續傳,已裝好的部分會跳過 |
 | `sudo: a terminal is required to read the password` | 不是在真正的終端機執行 | 改在本機終端機或 SSH 裡直接執行 |
 | Whisper 整段被跳過,印「找不到 nvcc 或 cmake」 | `command -v nvcc cmake` | 安裝 CUDA toolkit 與 `cmake`(`sudo apt install cmake`)後重跑 |
-| Whisper 沒印出「已啟動」 | `systemctl --user status whisper-server whisper-proxy` | `journalctl --user -u whisper-server -u whisper-proxy -n 50`,常見是 port 被佔用 |
-| Reranker 印「PyTorch 偵測不到 CUDA」 | `~/rerank-env/bin/python -c "import torch; print(torch.cuda.is_available())"` | 仍可用 CPU 執行,只是較慢 |
-| Reranker 沒印出「已啟動」 | `systemctl --user status rerank-server` | 第一次要下載模型權重(1~2 分鐘);`journalctl --user -u rerank-server -n 50` 看是否連不到 HuggingFace 或磁碟不足 |
-| 重開機後 Whisper / Reranker 連不到 | `loginctl show-user $USER -p Linger` 是否為 `yes` | 見第 6 節,執行 `sudo loginctl enable-linger $USER` |
+| Whisper 沒印出「已啟動」 | `sudo systemctl status whisper-server whisper-proxy` | `sudo journalctl -u whisper-server -u whisper-proxy -n 50`,常見是 port 被佔用 |
+| Reranker 印「PyTorch 偵測不到 CUDA」 | `sudo -u gx10 /opt/gx10/rerank-env/bin/python -c "import torch; print(torch.cuda.is_available())"` | 仍可用 CPU 執行,只是較慢 |
+| Reranker 沒印出「已啟動」 | `sudo systemctl status rerank-server` | 第一次要下載模型權重(1~2 分鐘);`sudo journalctl -u rerank-server -n 50` 看是否連不到 HuggingFace 或磁碟不足 |
+| 重開機後 Whisper / Reranker 連不到 | `sudo systemctl is-enabled whisper-server whisper-proxy rerank-server` 要都是 `enabled` | `sudo systemctl enable --now whisper-server whisper-proxy rerank-server` |
 | 雙擊 `.desktop` 沒反應 | 是否 clone 到 `~/gx10-setup` 以外的位置 | 改 clone 到 `~/gx10-setup`,或直接用指令執行 |
 | `bad interpreter: /bin/bash^M` | 檔案經過 Windows 電腦後換行格式被改掉 | `sed -i 's/\r$//' *.sh *.desktop` |
 
@@ -233,6 +233,17 @@ bash ollama_gb10.sh
 
 重跑是安全的:已安裝的 Ollama、已下載的模型、已編譯的 Whisper 都會跳過或只做增量更新。
 
+### 從 v1.0 升級
+
+v1.0 的 Whisper / Reranker 是裝在執行者家目錄的使用者服務(`systemctl --user`)。v1.1 起改成系統服務,重跑腳本時會自動:
+
+1. 建立 `gx10` 服務帳號與 `/opt/gx10/`
+2. 停用並移除舊的使用者服務,避免新舊兩套同時搶 port 8001 / 8002 / 8765
+3. 在 `/opt/gx10/` 重新下載並安裝 Whisper、Reranker、ffmpeg 與模型(跟全新安裝相同,約需 15~25 分鐘)
+4. 建立並啟動新的系統服務
+
+家目錄的舊檔案**不會自動刪除**。腳本最後會列出這些檔案與刪除指令(約 10 GB),確認新服務運作正常後再刪即可。v1.0 為安裝帳號開啟的 linger 不影響新版,不需要處理;若想關掉可執行 `sudo loginctl disable-linger $USER`。
+
 ## 11. 移除
 
 ```bash
@@ -245,17 +256,16 @@ sudo systemctl daemon-reload && sudo systemctl restart ollama
 # sudo rm -f /etc/systemd/system/ollama.service /usr/local/bin/ollama
 # sudo rm -rf /usr/local/lib/ollama /usr/share/ollama
 
-# Whisper STT
-systemctl --user disable --now whisper-server whisper-proxy
-rm -f ~/.config/systemd/user/whisper-server.service ~/.config/systemd/user/whisper-proxy.service
-systemctl --user daemon-reload
-rm -rf ~/whisper.cpp ~/whisper-env ~/whisper-proxy.py ~/bin/ffmpeg ~/bin/ffprobe
+# Whisper STT 與 Reranker
+sudo systemctl disable --now whisper-server whisper-proxy rerank-server
+sudo rm -f /etc/systemd/system/whisper-server.service \
+           /etc/systemd/system/whisper-proxy.service \
+           /etc/systemd/system/rerank-server.service
+sudo systemctl daemon-reload
 
-# Reranker
-systemctl --user disable --now rerank-server
-rm -f ~/.config/systemd/user/rerank-server.service
-systemctl --user daemon-reload
-rm -rf ~/rerank-env ~/rerank-server.py ~/.cache/huggingface/hub/models--BAAI--bge-reranker-v2-m3
+# 刪除程式、模型與服務帳號(約 10 GB)
+sudo rm -rf /opt/gx10
+sudo userdel gx10
 
 # Docker(含所有容器與映像檔,請確認再執行)
 # sudo apt purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin

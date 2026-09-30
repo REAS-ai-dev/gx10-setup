@@ -272,18 +272,50 @@ echo "Ollama 執行狀態（模型應顯示常駐 Forever）："
 OLLAMA_HOST="${OLLAMA_LISTEN_ADDR}" "$OLLAMA_BIN" ps || true
 
 # ------------------------------
-# 附加服務前置：啟用 linger
+# 附加服務前置：服務帳號與目錄
 # ------------------------------
 
-# Whisper / Reranker 是 systemd user service，預設只有在這個帳號登入時才會執行。
-# 啟用 linger 讓它們開機就啟動、登出後也繼續執行（伺服器重開機後通常不會有人登入）。
-if [ "${INSTALL_WHISPER:-1}" = "1" ] || [ "${INSTALL_RERANK:-1}" = "1" ]; then
-    if sudo loginctl enable-linger "$USER"; then
-        echo "已啟用 linger：Whisper / Reranker 開機即自動啟動，不需要登入。"
-    else
-        echo -e "${YELLOW}警告：啟用 linger 失敗，Whisper / Reranker 重開機後要等 ${USER} 登入才會啟動。${NC}"
-        echo "  可稍後手動執行：sudo loginctl enable-linger ${USER}"
+# Whisper / Reranker 以系統服務（/etc/systemd/system）執行，身分是專用的服務帳號 gx10，
+# 檔案集中在 /opt/gx10。不綁任何人的帳號：開機即啟動、不需要登入，任何管理員都能用
+# sudo systemctl 管理，服務本身也讀不到使用者家目錄。
+INSTALL_WHISPER="${INSTALL_WHISPER:-1}"
+INSTALL_RERANK="${INSTALL_RERANK:-1}"
+SVC_USER="gx10"
+SVC_HOME="/opt/gx10"
+SVC_PATH="${SVC_HOME}/bin:/usr/local/bin:/usr/bin:/bin"
+
+# 以服務帳號身分執行指令（先 cd 到 SVC_HOME，避免服務帳號讀不到目前所在目錄）
+run_as_svc() {
+    (cd "$SVC_HOME" && sudo -u "$SVC_USER" -H env "PATH=${SVC_PATH}" "$@")
+}
+
+# v1.0 的 Whisper / Reranker 是 systemd user service，裝在執行者的家目錄。
+# 升級時先停用並移除舊的 user service，避免新舊兩套同時搶同一個 port。
+remove_legacy_user_services() {
+    local unit_dir="${HOME}/.config/systemd/user"
+    local removed=0
+    local unit
+    for unit in "$@"; do
+        if [ -f "${unit_dir}/${unit}.service" ]; then
+            echo "  停用舊版使用者服務：${unit}"
+            systemctl --user disable --now "$unit" 2>/dev/null || true
+            rm -f "${unit_dir}/${unit}.service"
+            removed=1
+        fi
+    done
+    if [ "$removed" = "1" ]; then
+        systemctl --user daemon-reload 2>/dev/null || true
     fi
+}
+
+LEGACY_FILES=()
+
+if [ "$INSTALL_WHISPER" = "1" ] || [ "$INSTALL_RERANK" = "1" ]; then
+    if ! id "$SVC_USER" >/dev/null 2>&1; then
+        echo "建立服務帳號 ${SVC_USER}（家目錄 ${SVC_HOME}，不可登入）..."
+        sudo useradd --system --user-group --home-dir "$SVC_HOME" --shell /usr/sbin/nologin "$SVC_USER"
+    fi
+    sudo install -d -o "$SVC_USER" -g "$SVC_USER" -m 0755 "$SVC_HOME" "${SVC_HOME}/bin"
 fi
 
 # ------------------------------
@@ -291,13 +323,13 @@ fi
 # ------------------------------
 
 # 預設會裝；設 INSTALL_WHISPER=0 可跳過整段（例如這台機器不需要語音轉文字）
-INSTALL_WHISPER="${INSTALL_WHISPER:-1}"
 WHISPER_MODEL="${WHISPER_MODEL:-medium}"
 WHISPER_PORT="${WHISPER_PORT:-8765}"
 WHISPER_PROXY_PORT="${WHISPER_PROXY_PORT:-8002}"
-WHISPER_DIR="${HOME}/whisper.cpp"
-WHISPER_BIN_DIR="${HOME}/bin"
-WHISPER_VENV_DIR="${HOME}/whisper-env"
+WHISPER_DIR="${SVC_HOME}/whisper.cpp"
+WHISPER_BIN_DIR="${SVC_HOME}/bin"
+WHISPER_VENV_DIR="${SVC_HOME}/whisper-env"
+LEGACY_WHISPER_DIR="${HOME}/whisper.cpp"
 
 if [ "$INSTALL_WHISPER" = "1" ]; then
     echo ""
@@ -317,8 +349,7 @@ if [ "$INSTALL_WHISPER" = "1" ]; then
         echo "  請先確認 CUDA toolkit 與 cmake 已就緒後重跑此腳本，"
         echo "  或設定 INSTALL_WHISPER=0 以永久跳過這段。"
     else
-        mkdir -p "$WHISPER_BIN_DIR"
-        export PATH="${WHISPER_BIN_DIR}:$(dirname "$NVCC_PATH"):$PATH"
+        NVCC_DIR="$(dirname "$NVCC_PATH")"
 
         echo "[1/7] 安裝 ffmpeg（arm64 static）..."
         if [ -f "${WHISPER_BIN_DIR}/ffmpeg" ]; then
@@ -329,44 +360,45 @@ if [ "$INSTALL_WHISPER" = "1" ]; then
                 -o "${tmp_ffmpeg}/ffmpeg.tar.xz"
             tar xf "${tmp_ffmpeg}/ffmpeg.tar.xz" -C "$tmp_ffmpeg"
             ffmpeg_extracted="$(find "$tmp_ffmpeg" -maxdepth 1 -type d -name 'ffmpeg-*-arm64-static' | head -n 1)"
-            cp "${ffmpeg_extracted}/ffmpeg" "${ffmpeg_extracted}/ffprobe" "$WHISPER_BIN_DIR/"
+            sudo install -o "$SVC_USER" -g "$SVC_USER" -m 0755 \
+                "${ffmpeg_extracted}/ffmpeg" "${ffmpeg_extracted}/ffprobe" "$WHISPER_BIN_DIR/"
             rm -rf "$tmp_ffmpeg"
         fi
 
         echo "[2/7] 準備 whisper.cpp 原始碼..."
         if [ -d "${WHISPER_DIR}/.git" ]; then
-            git -C "$WHISPER_DIR" pull --ff-only
+            run_as_svc git -C "$WHISPER_DIR" pull --ff-only
         else
-            git clone https://github.com/ggerganov/whisper.cpp.git --depth=1 "$WHISPER_DIR"
+            run_as_svc git clone https://github.com/ggerganov/whisper.cpp.git --depth=1 "$WHISPER_DIR"
         fi
 
         echo "[3/7] 編譯 whisper.cpp（CUDA，約 2-3 分鐘）..."
-        (
-            cd "$WHISPER_DIR"
-            export CUDACXX="$NVCC_PATH"
-            cmake -B build \
+        run_as_svc "PATH=${NVCC_DIR}:${SVC_PATH}" "CUDACXX=${NVCC_PATH}" \
+            cmake -S "$WHISPER_DIR" -B "${WHISPER_DIR}/build" \
                 -DGGML_CUDA=ON \
                 -DCMAKE_CUDA_ARCHITECTURES=native \
                 -DWHISPER_BUILD_SERVER=ON \
                 -DCMAKE_BUILD_TYPE=Release \
                 -Wno-dev >/dev/null
-            cmake --build build --config Release -j"$(nproc)"
-        )
+        run_as_svc "PATH=${NVCC_DIR}:${SVC_PATH}" "CUDACXX=${NVCC_PATH}" \
+            cmake --build "${WHISPER_DIR}/build" --config Release -j"$(nproc)"
 
         echo "[4/7] 下載 whisper ${WHISPER_MODEL} 模型..."
-        if [ -f "${WHISPER_DIR}/models/ggml-${WHISPER_MODEL}.bin" ]; then
+        WHISPER_MODEL_FILE="${WHISPER_DIR}/models/ggml-${WHISPER_MODEL}.bin"
+        if [ -f "$WHISPER_MODEL_FILE" ]; then
             echo "  模型已存在，略過"
         else
-            bash "${WHISPER_DIR}/models/download-ggml-model.sh" "$WHISPER_MODEL"
+            run_as_svc bash "${WHISPER_DIR}/models/download-ggml-model.sh" "$WHISPER_MODEL"
         fi
 
         echo "[5/7] 建立 Whisper Proxy（OpenAI 相容 API，NeuroSme 用，port ${WHISPER_PROXY_PORT}）..."
         if [ ! -d "$WHISPER_VENV_DIR" ]; then
-            python3 -m venv "$WHISPER_VENV_DIR"
+            run_as_svc python3 -m venv "$WHISPER_VENV_DIR"
         fi
-        "${WHISPER_VENV_DIR}/bin/pip" install --quiet fastapi uvicorn python-multipart httpx
+        run_as_svc "${WHISPER_VENV_DIR}/bin/pip" install --quiet --no-cache-dir \
+            fastapi uvicorn python-multipart httpx
 
-        cat > "${HOME}/whisper-proxy.py" <<PYEOF
+        run_as_svc tee "${SVC_HOME}/whisper-proxy.py" >/dev/null <<PYEOF
 """Whisper Proxy：把 OpenAI /v1/audio/transcriptions 請求轉給 whisper.cpp /inference"""
 import httpx
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
@@ -438,20 +470,24 @@ if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=${WHISPER_PROXY_PORT}, log_level="info")
 PYEOF
 
-        echo "[6/7] 設定 whisper-server 與 whisper-proxy systemd user services..."
-        mkdir -p "${HOME}/.config/systemd/user"
-        cat > "${HOME}/.config/systemd/user/whisper-server.service" <<EOF
+        echo "[6/7] 設定 whisper-server 與 whisper-proxy 系統服務..."
+        remove_legacy_user_services whisper-proxy whisper-server
+
+        sudo tee /etc/systemd/system/whisper-server.service >/dev/null <<EOF
 [Unit]
 Description=Whisper.cpp STT Server (GPU)
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
+User=${SVC_USER}
+Group=${SVC_USER}
 WorkingDirectory=${WHISPER_DIR}
 Environment="LD_LIBRARY_PATH=${WHISPER_DIR}/build/bin"
-Environment="PATH=${WHISPER_BIN_DIR}:$(dirname "$NVCC_PATH"):/usr/local/bin:/usr/bin:/bin"
+Environment="PATH=${WHISPER_BIN_DIR}:${NVCC_DIR}:/usr/local/bin:/usr/bin:/bin"
 ExecStart=${WHISPER_DIR}/build/bin/whisper-server \\
-    -m ${WHISPER_DIR}/models/ggml-${WHISPER_MODEL}.bin \\
+    -m ${WHISPER_MODEL_FILE} \\
     --host 0.0.0.0 \\
     --port ${WHISPER_PORT} \\
     --convert \\
@@ -459,12 +495,16 @@ ExecStart=${WHISPER_DIR}/build/bin/whisper-server \\
     --threads 4
 Restart=always
 RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
 EOF
 
-        cat > "${HOME}/.config/systemd/user/whisper-proxy.service" <<EOF
+        sudo tee /etc/systemd/system/whisper-proxy.service >/dev/null <<EOF
 [Unit]
 Description=Whisper OpenAI-compatible Proxy (port ${WHISPER_PROXY_PORT})
 After=whisper-server.service
@@ -472,29 +512,47 @@ Wants=whisper-server.service
 
 [Service]
 Type=simple
-ExecStart=${WHISPER_VENV_DIR}/bin/python ${HOME}/whisper-proxy.py
+User=${SVC_USER}
+Group=${SVC_USER}
+WorkingDirectory=${SVC_HOME}
+ExecStart=${WHISPER_VENV_DIR}/bin/python ${SVC_HOME}/whisper-proxy.py
 Restart=always
 RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
 EOF
 
-        systemctl --user daemon-reload
-        systemctl --user enable --now whisper-server whisper-proxy
+        sudo systemctl daemon-reload
+        sudo systemctl enable whisper-server whisper-proxy
+        sudo systemctl restart whisper-server whisper-proxy
 
         echo "[7/7] 等待服務啟動並驗證..."
-        sleep 5
-        if curl --silent --fail --max-time 5 "http://127.0.0.1:${WHISPER_PROXY_PORT}/health" >/dev/null 2>&1; then
-            WHISPER_READY=1
+        WHISPER_READY=0
+        for attempt in $(seq 1 20); do
+            if curl --silent --fail --max-time 5 "http://127.0.0.1:${WHISPER_PROXY_PORT}/health" >/dev/null 2>&1; then
+                WHISPER_READY=1
+                break
+            fi
+            sleep 3
+        done
+        if [ "$WHISPER_READY" = "1" ]; then
             echo -e "${GREEN}Whisper Proxy（OpenAI 相容 API）已啟動：http://127.0.0.1:${WHISPER_PROXY_PORT}${NC}"
             echo "  NeuroSme 設定：Base URL = http://<機器IP>:${WHISPER_PROXY_PORT}，模型名稱 = Systran/faster-whisper-${WHISPER_MODEL}"
         else
-            WHISPER_READY=0
             echo -e "${YELLOW}警告：Whisper Proxy 未能在預期時間內啟動，請查看：${NC}"
-            echo "  systemctl --user status whisper-server whisper-proxy"
-            echo "  journalctl --user -u whisper-server -u whisper-proxy -n 50"
+            echo "  sudo systemctl status whisper-server whisper-proxy"
+            echo "  sudo journalctl -u whisper-server -u whisper-proxy -n 50"
         fi
+
+        for legacy in "$LEGACY_WHISPER_DIR" "${HOME}/whisper-env" "${HOME}/whisper-proxy.py" \
+                      "${HOME}/bin/ffmpeg" "${HOME}/bin/ffprobe"; do
+            if [ -e "$legacy" ]; then LEGACY_FILES+=("$legacy"); fi
+        done
     fi
 fi
 
@@ -505,10 +563,13 @@ fi
 # 預設會裝；設 INSTALL_RERANK=0 可跳過整段。
 # API 與 NeuroSme 的 Rerank 設定相容：POST /rerank {query, texts, top_n}
 # → {results: [{index, score}, ...]}。
-INSTALL_RERANK="${INSTALL_RERANK:-1}"
 RERANK_MODEL="${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}"
 RERANK_PORT="${RERANK_PORT:-8001}"
-RERANK_VENV_DIR="${HOME}/rerank-env"
+RERANK_VENV_DIR="${SVC_HOME}/rerank-env"
+RERANK_HF_HOME="${SVC_HOME}/huggingface"
+# HuggingFace 快取裡的模型資料夾名稱，例如 BAAI/bge-reranker-v2-m3 → models--BAAI--bge-reranker-v2-m3
+RERANK_CACHE_NAME="models--${RERANK_MODEL//\//--}"
+LEGACY_RERANK_CACHE="${HOME}/.cache/huggingface/hub/${RERANK_CACHE_NAME}"
 
 if [ "$INSTALL_RERANK" = "1" ]; then
     echo ""
@@ -518,20 +579,22 @@ if [ "$INSTALL_RERANK" = "1" ]; then
 
     echo "[1/4] 建立 Python venv 並安裝套件（fastapi/uvicorn/torch/transformers，第一次跑可能要幾分鐘）..."
     if [ ! -d "$RERANK_VENV_DIR" ]; then
-        python3 -m venv "$RERANK_VENV_DIR"
+        run_as_svc python3 -m venv "$RERANK_VENV_DIR"
     fi
 
-    if "${RERANK_VENV_DIR}/bin/pip" install --quiet --upgrade pip \
-        && "${RERANK_VENV_DIR}/bin/pip" install --quiet fastapi uvicorn pydantic torch transformers accelerate; then
+    if run_as_svc "${RERANK_VENV_DIR}/bin/pip" install --quiet --no-cache-dir --upgrade pip \
+        && run_as_svc "${RERANK_VENV_DIR}/bin/pip" install --quiet --no-cache-dir \
+            fastapi uvicorn pydantic torch transformers accelerate; then
 
-        CUDA_OK="$("${RERANK_VENV_DIR}/bin/python" -c 'import torch; print("1" if torch.cuda.is_available() else "0")' 2>/dev/null || echo "0")"
+        # 以服務帳號身分檢查，順便確認 gx10 帳號本身能使用 GPU
+        CUDA_OK="$(run_as_svc "${RERANK_VENV_DIR}/bin/python" -c 'import torch; print("1" if torch.cuda.is_available() else "0")' 2>/dev/null || echo "0")"
         if [ "$CUDA_OK" != "1" ]; then
             echo -e "${YELLOW}警告：這個環境裝到的 PyTorch 偵測不到 CUDA，Reranker 會退回 CPU 執行（較慢）。${NC}"
             echo "  如需 GPU 加速，請確認 PyTorch 版本有支援 GB10（aarch64 + CUDA 13 / SM121）。"
         fi
 
         echo "[2/4] 產生 Reranker Server（port ${RERANK_PORT}）..."
-        cat > "${HOME}/rerank-server.py" <<PYEOF
+        run_as_svc tee "${SVC_HOME}/rerank-server.py" >/dev/null <<PYEOF
 """Rerank Server：${RERANK_MODEL} cross-encoder，實作 NeuroSme Rerank 設定期待的 API"""
 import torch
 from fastapi import FastAPI, HTTPException
@@ -582,25 +645,36 @@ if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=${RERANK_PORT}, log_level="info")
 PYEOF
 
-        echo "[3/4] 設定 rerank-server systemd user service..."
-        mkdir -p "${HOME}/.config/systemd/user"
-        cat > "${HOME}/.config/systemd/user/rerank-server.service" <<EOF
+        echo "[3/4] 設定 rerank-server 系統服務..."
+        remove_legacy_user_services rerank-server
+
+        sudo tee /etc/systemd/system/rerank-server.service >/dev/null <<EOF
 [Unit]
 Description=Reranker Server (${RERANK_MODEL})
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${RERANK_VENV_DIR}/bin/python ${HOME}/rerank-server.py
+User=${SVC_USER}
+Group=${SVC_USER}
+WorkingDirectory=${SVC_HOME}
+Environment="HF_HOME=${RERANK_HF_HOME}"
+ExecStart=${RERANK_VENV_DIR}/bin/python ${SVC_HOME}/rerank-server.py
 Restart=always
 RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
 EOF
 
-        systemctl --user daemon-reload
-        systemctl --user enable --now rerank-server
+        sudo systemctl daemon-reload
+        sudo systemctl enable rerank-server
+        sudo systemctl restart rerank-server
 
         echo "[4/4] 等待 Reranker 啟動（第一次要下載模型權重，可能要 1-2 分鐘）..."
         RERANK_READY=0
@@ -620,9 +694,13 @@ EOF
             echo "  測試呼叫：${RERANK_TEST}"
         else
             echo -e "${YELLOW}警告：Reranker 未能在預期時間內啟動，請查看：${NC}"
-            echo "  systemctl --user status rerank-server"
-            echo "  journalctl --user -u rerank-server -n 50"
+            echo "  sudo systemctl status rerank-server"
+            echo "  sudo journalctl -u rerank-server -n 50"
         fi
+
+        for legacy in "${HOME}/rerank-env" "${HOME}/rerank-server.py" "$LEGACY_RERANK_CACHE"; do
+            if [ -e "$legacy" ]; then LEGACY_FILES+=("$legacy"); fi
+        done
     else
         echo -e "${YELLOW}警告：Python 套件安裝失敗，略過 Reranker 安裝。${NC}"
         echo "  可手動檢查網路／磁碟空間後重跑，或設定 INSTALL_RERANK=0 以永久跳過這段。"
@@ -647,14 +725,24 @@ echo "查看服務狀態：sudo systemctl status ollama"
 echo "查看服務日誌：sudo journalctl -u ollama -f"
 echo "確認模型是否使用 GPU：OLLAMA_HOST=${OLLAMA_LISTEN_ADDR} ollama ps"
 if [ "$INSTALL_WHISPER" = "1" ]; then
-    echo "查看 Whisper 服務狀態：systemctl --user status whisper-server whisper-proxy"
-    echo "查看 Whisper 服務日誌：journalctl --user -u whisper-server -u whisper-proxy -f"
+    echo "查看 Whisper 服務狀態：sudo systemctl status whisper-server whisper-proxy"
+    echo "查看 Whisper 服務日誌：sudo journalctl -u whisper-server -u whisper-proxy -f"
 fi
 if [ "$INSTALL_RERANK" = "1" ]; then
-    echo "查看 Reranker 服務狀態：systemctl --user status rerank-server"
-    echo "查看 Reranker 服務日誌：journalctl --user -u rerank-server -f"
+    echo "查看 Reranker 服務狀態：sudo systemctl status rerank-server"
+    echo "查看 Reranker 服務日誌：sudo journalctl -u rerank-server -f"
 fi
 echo "=================================================="
+
+# 從 v1.0（使用者服務版）升級時，家目錄裡的舊檔案已不再使用，只提示、不自動刪除
+if [ "${#LEGACY_FILES[@]}" -gt 0 ]; then
+    echo ""
+    echo -e "${YELLOW}以下是舊版（v1.0）安裝在家目錄的檔案，服務已改用 ${SVC_HOME}，這些檔案不再使用。${NC}"
+    echo "確認 Whisper / Reranker 運作正常後，可執行以下指令刪除以釋放空間："
+    printf '  rm -rf'
+    printf ' %q' "${LEGACY_FILES[@]}"
+    printf '\n'
+fi
 
 # ------------------------------
 # 產生部署報告
@@ -735,10 +823,10 @@ fi
     echo "sudo systemctl status ollama"
     echo "OLLAMA_HOST=${OLLAMA_LISTEN_ADDR} ollama ps"
     if [ "$INSTALL_WHISPER" = "1" ]; then
-        echo "systemctl --user status whisper-server whisper-proxy"
+        echo "sudo systemctl status whisper-server whisper-proxy"
     fi
     if [ "$INSTALL_RERANK" = "1" ]; then
-        echo "systemctl --user status rerank-server"
+        echo "sudo systemctl status rerank-server"
     fi
     if [ -n "$DOCKER_VERSION" ]; then
         echo "docker ps"
