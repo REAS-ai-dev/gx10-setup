@@ -7,7 +7,7 @@
 - **Reranker**(`BAAI/bge-reranker-v2-m3`)
 - **Docker**(選用,給同一台機器上要跑的其他容器服務用)
 
-裝完後可直接給 NeuroSme 或其他支援 Ollama / OpenAI 相容 API 的應用程式使用。
+裝完後可直接給 [NeuroSme Private Hub](https://ee.neurosme.ai/zh-TW)(REAS.ai 的企業 AI 轉型平台)使用,也適用其他支援 Ollama / OpenAI 相容 API 的應用程式。
 
 ---
 
@@ -88,9 +88,9 @@ Whisper 與 Reranker 以系統服務執行,身分是安裝時自動建立的專�
 
 腳本跑完會在 `~/gx10-setup` 底下產生一份 `gb10-install-report-<時間>.md` 部署報告,列出各服務狀態與連線網址。
 
-### 給 NeuroSme 的設定
+### 給 NeuroSme Private Hub 的設定
 
-| NeuroSme 設定 | 填什麼 |
+| NeuroSme Private Hub 設定 | 填什麼 |
 |---|---|
 | Ollama Base URL | `http://<機器 IP>:11434`(IP 見第 5 節) |
 | 對話模型 | `gemma4:26b` |
